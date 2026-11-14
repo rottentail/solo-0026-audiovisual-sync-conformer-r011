@@ -153,12 +153,61 @@ renamed into place after all contents and digests pass validation.
 ```text
 cmd/syncservice/        HTTP server entry point
 cmd/syncflowcheck/      production workflow checks
+cmd/mediahealthcheck/   read-only local WAV/Y4M health check CLI
 internal/httpapi/       routing, JSON errors, limits, and media responses
 internal/service/       workflow orchestration and lifecycle control
 internal/domain/        records, validation, IDs, states, and stable errors
 internal/media/         WAV/Y4M codecs, signal detection, alignment, and packaging
 internal/storage/       locks, atomic writes, and repository operations
+internal/healthcheck/   streaming, bounded-memory media probes and pairing
 ```
+
+## Local media health check
+
+`cmd/mediahealthcheck` is a reusable, read-only tool for inspecting a directory
+of experimental WAV/Y4M material without importing it into the service data
+directory. It pairs files by basename, decides whether the current service
+would admit each pair, and reports the analyzable audio/picture relationship
+using the same admission rules and detection math as the service.
+
+```bash
+go run ./cmd/mediahealthcheck -dir ./media/incoming -recursive \
+  -format text -report ./media/health-report.txt
+```
+
+Settings:
+
+- `-dir`: directory containing the WAV and Y4M files (non-recursive by
+  default; `-recursive` descends into subdirectories).
+- `-format`: `text` (default) or `json` for machine-readable output.
+- `-report`: write the report to a file instead of stdout. The scanned media
+  itself is only ever opened with `os.Open` (read-only).
+- `-memory-budget-mib`: streaming block size in MiB (default 16). Files are
+  read in fixed blocks, so a batch larger than the memory budget is still
+  processed; whole files are never loaded.
+- `-verify-content`: re-hash every file after scanning. Stat changes (size,
+  mode, mtime) are always detected; this additionally catches same-size
+  rewrites.
+- `-min-confidence` / `-max-offset-ms`: the sync policy applied locally;
+  defaults match the service (`0.55` and `1000` ms).
+
+Each report row carries the SHA-256 digest, size, and modification time of the
+exact bytes read, plus one of three verdicts:
+
+- `admittable`: both files pass every admission rule and the combined base64
+  request fits the request limit; a sync result is included.
+- `not_admittable`: at least one file fails a rule the service enforces, or the
+  pair is incomplete; the stable finding codes explain why.
+- `indeterminate`: a file changed while it was being read, or a basename
+  resolves to multiple files. No confident audio/picture conclusion is emitted
+  for unstable bytes.
+
+The process exits `0` when every group is admittable and stable, and `1` when
+any group is rejected or indeterminate, so the command can gate a pipeline.
+The JSON report's `sync.status` mirrors the service analysis outcomes:
+`ready`, `sync_detection_failed`, `low_confidence`, `offset_exceeded`, or a
+`skipped_*` reason when no trustworthy measurement is possible.
+
 
 ## Workflow checks
 
